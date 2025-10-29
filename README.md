@@ -1,6 +1,6 @@
 # Comprezz
 
-A single-file gzip/deflate compression library for Zig, based on code from the Zig 0.14 standard library.
+A single-file [gzip/deflate compression library](https://bkataru.bearblog.dev/comprezzzig/) for Zig, based on code from the Zig 0.14 standard library.
 
 ## Features
 
@@ -9,7 +9,6 @@ A single-file gzip/deflate compression library for Zig, based on code from the Z
 - **Gzip format** - Proper headers and CRC32 checksums
 - **Library + CLI** - Use as a dependency or command-line tool
 - **Zero dependencies** - Self-contained implementation
-- **Comprehensive tests** - All tests included in the library
 
 ## Installation
 
@@ -254,16 +253,15 @@ This code is based on the Zig 0.14 standard library, which is part of the Zig pr
 
 - Original implementation based on Zig 0.14 standard library
 - Deflate algorithm implementation inspired by zlib and Go's compress/flate
-- Adapted for Zig 0.15 compatibility with new `std.Io.Reader` and `std.Io.Writer` interfaces
+- Adapted for Zig 0.15 compatibility with its new `std.Io.Reader` and `std.Io.Writer` interfaces
 
 ## Limitations
 
-- **Compression only**: Decompression is not implemented (removed along with compression in Zig 0.15)
+- **Compression only**: Decompression is not implemented yet
 - **Single-threaded**: Uses a single-threaded implementation
-- **Memory usage**: Uses ~400KB of memory for the compression algorithm
 
 ## Contributing
 
 This is a single-file library copied from Zig's standard library. For Zig language development, see [ziglang.org](https://ziglang.org/).
 
-For issues or improvements to this specific package, please report them through appropriate channels.
+For issues or improvements to this specific package, open an issue on this GitHub repo and/or raise a PR.

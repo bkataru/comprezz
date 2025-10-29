@@ -1,5 +1,4 @@
 ﻿.{
-    .fingerprint = 0xe12ad0f4846ee53d,
     .name = .comprezz,
     .version = "0.1.0",
     .minimum_zig_version = "0.15.0",
