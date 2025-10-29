@@ -44,8 +44,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-const testing = std.testing;
-const expect = testing.expect;
+const expect = std.testing.expect;
 const print = std.debug.print;
 const mem = std.mem;
 const math = std.math;
