@@ -12,7 +12,13 @@ A single-file [gzip/deflate compression library](https://bkataru.bearblog.dev/co
 
 ## Installation
 
-Add to your `build.zig.zon`:
+Add to your `build.zig.zon` with:
+
+```shell
+$ zig fetch --save git+https://github.com/bkataru/comprezz.git
+```
+
+Which should update it as such:
 
 ```zig
 .{
@@ -20,7 +26,8 @@ Add to your `build.zig.zon`:
     .version = "0.1.0",
     .dependencies = .{
         .comprezz = .{
-            .path = "path/to/comprezz",
+            .url = "https://github.com/bkataru/comprezz.git"
+            .hash = "0a20xh2as0572jdhgb52..."
         },
     },
 }
