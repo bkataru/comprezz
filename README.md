@@ -1,6 +1,6 @@
 # Comprezz
 
-A single-file [gzip/deflate compression library](https://bkataru.bearblog.dev/comprezzzig/) for Zig, based on code from the Zig 0.14 standard library.
+A single-file [gzip/deflate compression library](https://bkataru.bearblog.dev/comprezzzig/) and CLI binary for Zig, based on code from the Zig 0.14 standard library.
 
 ## Features
 
