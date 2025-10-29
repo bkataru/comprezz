@@ -2,18 +2,38 @@
 //!
 //! This is a single-file implementation of gzip/deflate compression copied from
 //! the Zig 0.14 standard library, as compression was removed in Zig 0.15.
+//! Updated to use Zig 0.15's new std.Io.Reader and std.Io.Writer interfaces.
 //!
 //! Usage:
 //! ```zig
-//! var buffer: [1024]u8 = undefined;
-//! var fbs = std.io.fixedBufferStream(&buffer);
+//! const std = @import("std");
+//! const comprezz = @import("comprezz");
+//!
+//! var compressed_buffer: [1024]u8 = undefined;
+//! var fixed_writer = std.Io.Writer.fixed(&compressed_buffer);
 //!
 //! const data = "Hello, World!";
-//! var input = std.io.fixedBufferStream(data);
+//! var input_buffer: [1024]u8 = undefined;
+//! @memcpy(input_buffer[0..data.len], data);
+//! var input_reader = std.Io.Reader.fixed(input_buffer[0..data.len]);
 //!
-//! try comprezz.compress(input.reader(), fbs.writer(), .{});
+//! try comprezz.compress(&input_reader, &fixed_writer, .{});
+//! ```
 //!
-//! const compressed = fbs.getWritten();
+//! Or with files:
+//! ```zig
+//! const std = @import("std");
+//! const comprezz = @import("comprezz");
+//!
+//! const input_file = try std.fs.cwd().openFile("input.txt", .{});
+//! defer input_file.close();
+//! var input_reader = input_file.reader();
+//!
+//! const output_file = try std.fs.cwd().createFile("output.gz", .{});
+//! defer output_file.close();
+//! var output_writer = output_file.writer();
+//!
+//! try comprezz.compress(&input_reader, &output_writer, .{ .level = .best });
 //! ```
 //!
 //! Features:
@@ -21,9 +41,9 @@
 //! - Configurable compression levels (fast, default, best)
 //! - Gzip format with proper headers and CRC32 checksums
 //! - All unit and integration tests included
+//! - Uses Zig 0.15's new std.Io.Reader and std.Io.Writer interfaces
 
 const std = @import("std");
-const io = std.io;
 const assert = std.debug.assert;
 const testing = std.testing;
 const expect = testing.expect;
@@ -294,84 +314,81 @@ pub const Token = struct {
     };
 };
 
-pub fn BitWriter(comptime WriterType: type) type {
+pub const BitWriter = struct {
     const buffer_flush_size = 240;
     const buffer_size = buffer_flush_size + 8;
 
-    return struct {
-        inner_writer: WriterType,
-        bits: u64 = 0,
-        nbits: u32 = 0,
-        bytes: [buffer_size]u8 = undefined,
-        nbytes: u32 = 0,
+    inner_writer: *std.Io.Writer,
+    bits: u64 = 0,
+    nbits: u32 = 0,
+    bytes: [buffer_size]u8 = undefined,
+    nbytes: u32 = 0,
 
-        const Self = @This();
-        const ActualWriterType = if (@typeInfo(WriterType) == .pointer) @typeInfo(WriterType).pointer.child else WriterType;
+    const Self = @This();
 
-        pub const Error = ActualWriterType.Error || error{UnfinishedBits};
+    pub const Error = std.Io.Writer.Error || error{UnfinishedBits};
 
-        pub fn init(writer: WriterType) Self {
-            return .{ .inner_writer = writer };
-        }
+    pub fn init(writer: *std.Io.Writer) Self {
+        return .{ .inner_writer = writer };
+    }
 
-        pub fn setWriter(self: *Self, new_writer: WriterType) void {
-            self.inner_writer = new_writer;
-        }
+    pub fn setWriter(self: *Self, new_writer: *std.Io.Writer) void {
+        self.inner_writer = new_writer;
+    }
 
-        pub fn flush(self: *Self) Error!void {
-            var n = self.nbytes;
-            while (self.nbits != 0) {
-                self.bytes[n] = @as(u8, @truncate(self.bits));
-                self.bits >>= 8;
-                if (self.nbits > 8) {
-                    self.nbits -= 8;
-                } else {
-                    self.nbits = 0;
-                }
-                n += 1;
-            }
-            self.bits = 0;
-            _ = try self.inner_writer.write(self.bytes[0..n]);
-            self.nbytes = 0;
-        }
-
-        pub fn writeBits(self: *Self, b: u32, nb: u32) Error!void {
-            self.bits |= @as(u64, @intCast(b)) << @as(u6, @intCast(self.nbits));
-            self.nbits += nb;
-            if (self.nbits < 48)
-                return;
-
-            var n = self.nbytes;
-            std.mem.writeInt(u64, self.bytes[n..][0..8], self.bits, .little);
-            n += 6;
-            if (n >= buffer_flush_size) {
-                _ = try self.inner_writer.write(self.bytes[0..n]);
-                n = 0;
-            }
-            self.nbytes = n;
-            self.bits >>= 48;
-            self.nbits -= 48;
-        }
-
-        pub fn writeBytes(self: *Self, bytes: []const u8) Error!void {
-            var n = self.nbytes;
-            if (self.nbits & 7 != 0) {
-                return error.UnfinishedBits;
-            }
-            while (self.nbits != 0) {
-                self.bytes[n] = @as(u8, @truncate(self.bits));
-                self.bits >>= 8;
+    pub fn flush(self: *Self) Error!void {
+        var n = self.nbytes;
+        while (self.nbits != 0) {
+            self.bytes[n] = @as(u8, @truncate(self.bits));
+            self.bits >>= 8;
+            if (self.nbits > 8) {
                 self.nbits -= 8;
-                n += 1;
+            } else {
+                self.nbits = 0;
             }
-            if (n != 0) {
-                _ = try self.inner_writer.write(self.bytes[0..n]);
-            }
-            self.nbytes = 0;
-            _ = try self.inner_writer.write(bytes);
+            n += 1;
         }
-    };
-}
+        self.bits = 0;
+        _ = try self.inner_writer.write(self.bytes[0..n]);
+        self.nbytes = 0;
+    }
+
+    pub fn writeBits(self: *Self, b: u32, nb: u32) Error!void {
+        self.bits |= @as(u64, @intCast(b)) << @as(u6, @intCast(self.nbits));
+        self.nbits += nb;
+        if (self.nbits < 48)
+            return;
+
+        var n = self.nbytes;
+        std.mem.writeInt(u64, self.bytes[n..][0..8], self.bits, .little);
+        n += 6;
+        if (n >= buffer_flush_size) {
+            _ = try self.inner_writer.write(self.bytes[0..n]);
+            n = 0;
+        }
+        self.nbytes = n;
+        self.bits >>= 48;
+        self.nbits -= 48;
+    }
+
+    pub fn writeBytes(self: *Self, bytes: []const u8) Error!void {
+        var n = self.nbytes;
+        if (self.nbits & 7 != 0) {
+            return error.UnfinishedBits;
+        }
+        while (self.nbits != 0) {
+            self.bytes[n] = @as(u8, @truncate(self.bits));
+            self.bits >>= 8;
+            self.nbits -= 8;
+            n += 1;
+        }
+        if (n != 0) {
+            _ = try self.inner_writer.write(self.bytes[0..n]);
+        }
+        self.nbytes = 0;
+        _ = try self.inner_writer.write(bytes);
+    }
+};
 
 const LiteralNode = struct {
     literal: u16,
@@ -832,7 +849,7 @@ pub const Container = enum {
         WrongZlibChecksum,
     };
 
-    pub fn writeHeader(comptime wrap: Container, writer: anytype) !void {
+    pub fn writeHeader(comptime wrap: Container, writer: *std.Io.Writer) !void {
         switch (wrap) {
             .gzip => {
                 const gzipHeader = [_]u8{ 0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03 };
@@ -846,7 +863,7 @@ pub const Container = enum {
         }
     }
 
-    pub fn writeFooter(comptime wrap: Container, hasher: *Hasher(wrap), writer: anytype) !void {
+    pub fn writeFooter(comptime wrap: Container, hasher: *Hasher(wrap), writer: *std.Io.Writer) !void {
         var bits: [4]u8 = undefined;
         switch (wrap) {
             .gzip => {
@@ -905,450 +922,447 @@ pub const Container = enum {
     }
 };
 
-pub fn blockWriter(writer: anytype) BlockWriter(@TypeOf(writer)) {
-    return BlockWriter(@TypeOf(writer)).init(writer);
+pub fn blockWriter(writer: *std.Io.Writer) BlockWriter {
+    return BlockWriter.init(writer);
 }
 
-pub fn BlockWriter(comptime WriterType: type) type {
-    const BitWriterType = BitWriter(WriterType);
-    return struct {
-        const codegen_order = consts.huffman.codegen_order;
-        const end_code_mark = 255;
-        const Self = @This();
+pub const BlockWriter = struct {
+    const codegen_order = consts.huffman.codegen_order;
+    const end_code_mark = 255;
+    const Self = @This();
 
-        pub const Error = BitWriterType.Error;
-        bit_writer: BitWriterType,
+    pub const Error = BitWriter.Error;
+    bit_writer: BitWriter,
 
-        codegen_freq: [consts.huffman.codegen_code_count]u16 = undefined,
-        literal_freq: [consts.huffman.max_num_lit]u16 = undefined,
-        distance_freq: [consts.huffman.distance_code_count]u16 = undefined,
-        codegen: [consts.huffman.max_num_lit + consts.huffman.distance_code_count + 1]u8 = undefined,
-        literal_encoding: LiteralEncoder = .{},
-        distance_encoding: DistanceEncoder = .{},
-        codegen_encoding: CodegenEncoder = .{},
-        fixed_literal_encoding: LiteralEncoder,
-        fixed_distance_encoding: DistanceEncoder,
-        huff_distance: DistanceEncoder,
+    codegen_freq: [consts.huffman.codegen_code_count]u16 = undefined,
+    literal_freq: [consts.huffman.max_num_lit]u16 = undefined,
+    distance_freq: [consts.huffman.distance_code_count]u16 = undefined,
+    codegen: [consts.huffman.max_num_lit + consts.huffman.distance_code_count + 1]u8 = undefined,
+    literal_encoding: LiteralEncoder = .{},
+    distance_encoding: DistanceEncoder = .{},
+    codegen_encoding: CodegenEncoder = .{},
+    fixed_literal_encoding: LiteralEncoder,
+    fixed_distance_encoding: DistanceEncoder,
+    huff_distance: DistanceEncoder,
 
-        pub fn init(writer: WriterType) Self {
-            return .{
-                .bit_writer = BitWriterType.init(writer),
-                .fixed_literal_encoding = fixedLiteralEncoder(),
-                .fixed_distance_encoding = fixedDistanceEncoder(),
-                .huff_distance = huffmanDistanceEncoder(),
-            };
+    pub fn init(writer: *std.Io.Writer) Self {
+        return .{
+            .bit_writer = BitWriter.init(writer),
+            .fixed_literal_encoding = fixedLiteralEncoder(),
+            .fixed_distance_encoding = fixedDistanceEncoder(),
+            .huff_distance = huffmanDistanceEncoder(),
+        };
+    }
+
+    pub fn flush(self: *Self) Error!void {
+        try self.bit_writer.flush();
+    }
+
+    pub fn setWriter(self: *Self, new_writer: *std.Io.Writer) void {
+        self.bit_writer.setWriter(new_writer);
+    }
+
+    fn writeCode(self: *Self, c: HuffCode) Error!void {
+        try self.bit_writer.writeBits(c.code, c.len);
+    }
+
+    pub fn storedBlock(self: *Self, input: []const u8, eof: bool) Error!void {
+        try self.storedHeader(input.len, eof);
+        try self.bit_writer.writeBytes(input);
+    }
+
+    fn storedHeader(self: *Self, length: usize, eof: bool) Error!void {
+        assert(length <= 65535);
+        const flag: u32 = if (eof) 1 else 0;
+        try self.bit_writer.writeBits(flag, 3);
+        try self.flush();
+        const l: u16 = @intCast(length);
+        try self.bit_writer.writeBits(l, 16);
+        try self.bit_writer.writeBits(~l, 16);
+    }
+
+    fn fixedHeader(self: *Self, eof: bool) Error!void {
+        var value: u32 = 2;
+        if (eof) {
+            value = 3;
+        }
+        try self.bit_writer.writeBits(value, 3);
+    }
+
+    pub fn write(self: *Self, tokens: []const Token, eof: bool, input: ?[]const u8) Error!void {
+        const lit_and_dist = self.indexTokens(tokens);
+        const num_literals = lit_and_dist.num_literals;
+        const num_distances = lit_and_dist.num_distances;
+
+        var extra_bits: u32 = 0;
+        const ret = storedSizeFits(input);
+        const stored_size = ret.size;
+        const storable = ret.storable;
+
+        if (storable) {
+            var length_code: u16 = Token.length_codes_start + 8;
+            while (length_code < num_literals) : (length_code += 1) {
+                extra_bits += @as(u32, @intCast(self.literal_freq[length_code])) *
+                    @as(u32, @intCast(Token.lengthExtraBits(length_code)));
+            }
+            var distance_code: u16 = 4;
+            while (distance_code < num_distances) : (distance_code += 1) {
+                extra_bits += @as(u32, @intCast(self.distance_freq[distance_code])) *
+                    @as(u32, @intCast(Token.distanceExtraBits(distance_code)));
+            }
         }
 
-        pub fn flush(self: *Self) Error!void {
-            try self.bit_writer.flush();
+        var literal_encoding = &self.fixed_literal_encoding;
+        var distance_encoding = &self.fixed_distance_encoding;
+        var size = self.fixedSize(extra_bits);
+
+        var num_codegens: u32 = 0;
+
+        self.generateCodegen(
+            num_literals,
+            num_distances,
+            &self.literal_encoding,
+            &self.distance_encoding,
+        );
+        self.codegen_encoding.generate(self.codegen_freq[0..], 7);
+        const dynamic_size = self.dynamicSize(
+            &self.literal_encoding,
+            &self.distance_encoding,
+            extra_bits,
+        );
+        const dyn_size = dynamic_size.size;
+        num_codegens = dynamic_size.num_codegens;
+
+        if (dyn_size < size) {
+            size = dyn_size;
+            literal_encoding = &self.literal_encoding;
+            distance_encoding = &self.distance_encoding;
         }
 
-        pub fn setWriter(self: *Self, new_writer: WriterType) void {
-            self.bit_writer.setWriter(new_writer);
+        if (storable and stored_size < size) {
+            try self.storedBlock(input.?, eof);
+            return;
         }
 
-        fn writeCode(self: *Self, c: HuffCode) Error!void {
+        if (@intFromPtr(literal_encoding) == @intFromPtr(&self.fixed_literal_encoding)) {
+            try self.fixedHeader(eof);
+        } else {
+            try self.dynamicHeader(num_literals, num_distances, num_codegens, eof);
+        }
+
+        try self.writeTokens(tokens, &literal_encoding.codes, &distance_encoding.codes);
+    }
+
+    pub fn huffmanBlock(self: *Self, input: []const u8, eof: bool) Error!void {
+        histogram(input, &self.literal_freq);
+
+        self.literal_freq[consts.huffman.end_block_marker] = 1;
+
+        const num_literals = consts.huffman.end_block_marker + 1;
+        self.distance_freq[0] = 1;
+        const num_distances = 1;
+
+        self.literal_encoding.generate(&self.literal_freq, 15);
+
+        var num_codegens: u32 = 0;
+
+        self.generateCodegen(
+            num_literals,
+            num_distances,
+            &self.literal_encoding,
+            &self.huff_distance,
+        );
+        self.codegen_encoding.generate(self.codegen_freq[0..], 7);
+        const dynamic_size = self.dynamicSize(&self.literal_encoding, &self.huff_distance, 0);
+        const size = dynamic_size.size;
+        num_codegens = dynamic_size.num_codegens;
+
+        const stored_size_ret = storedSizeFits(input);
+        const ssize = stored_size_ret.size;
+        const storable = stored_size_ret.storable;
+
+        if (storable and ssize < (size + (size >> 4))) {
+            try self.storedBlock(input, eof);
+            return;
+        }
+
+        try self.dynamicHeader(num_literals, num_distances, num_codegens, eof);
+        const encoding = self.literal_encoding.codes[0..257];
+
+        for (input) |t| {
+            const c = encoding[t];
             try self.bit_writer.writeBits(c.code, c.len);
         }
+        try self.writeCode(encoding[consts.huffman.end_block_marker]);
+    }
 
-        pub fn storedBlock(self: *Self, input: []const u8, eof: bool) Error!void {
-            try self.storedHeader(input.len, eof);
-            try self.bit_writer.writeBytes(input);
+    const TotalIndexedTokens = struct {
+        num_literals: u32,
+        num_distances: u32,
+    };
+
+    fn indexTokens(self: *Self, tokens: []const Token) TotalIndexedTokens {
+        var num_literals: u32 = 0;
+        var num_distances: u32 = 0;
+
+        for (self.literal_freq, 0..) |_, i| {
+            self.literal_freq[i] = 0;
+        }
+        for (self.distance_freq, 0..) |_, i| {
+            self.distance_freq[i] = 0;
         }
 
-        fn storedHeader(self: *Self, length: usize, eof: bool) Error!void {
-            assert(length <= 65535);
-            const flag: u32 = if (eof) 1 else 0;
-            try self.bit_writer.writeBits(flag, 3);
-            try self.flush();
-            const l: u16 = @intCast(length);
-            try self.bit_writer.writeBits(l, 16);
-            try self.bit_writer.writeBits(~l, 16);
-        }
-
-        fn fixedHeader(self: *Self, eof: bool) Error!void {
-            var value: u32 = 2;
-            if (eof) {
-                value = 3;
+        for (tokens) |t| {
+            if (t.kind == Token.Kind.literal) {
+                self.literal_freq[t.literal()] += 1;
+                continue;
             }
+            self.literal_freq[t.lengthCode()] += 1;
+            self.distance_freq[t.distanceCode()] += 1;
+        }
+        self.literal_freq[consts.huffman.end_block_marker] += 1;
+
+        num_literals = @as(u32, @intCast(self.literal_freq.len));
+        while (self.literal_freq[num_literals - 1] == 0) {
+            num_literals -= 1;
+        }
+        num_distances = @as(u32, @intCast(self.distance_freq.len));
+        while (num_distances > 0 and self.distance_freq[num_distances - 1] == 0) {
+            num_distances -= 1;
+        }
+        if (num_distances == 0) {
+            self.distance_freq[0] = 1;
+            num_distances = 1;
+        }
+        self.literal_encoding.generate(&self.literal_freq, 15);
+        self.distance_encoding.generate(&self.distance_freq, 15);
+        return TotalIndexedTokens{
+            .num_literals = num_literals,
+            .num_distances = num_distances,
+        };
+    }
+
+    fn writeTokens(
+        self: *Self,
+        tokens: []const Token,
+        le_codes: []HuffCode,
+        oe_codes: []HuffCode,
+    ) Error!void {
+        for (tokens) |t| {
+            if (t.kind == Token.Kind.literal) {
+                try self.writeCode(le_codes[t.literal()]);
+                continue;
+            }
+
+            const le = t.lengthEncoding();
+            try self.writeCode(le_codes[le.code]);
+            if (le.extra_bits > 0) {
+                try self.bit_writer.writeBits(le.extra_length, le.extra_bits);
+            }
+
+            const oe = t.distanceEncoding();
+            try self.writeCode(oe_codes[oe.code]);
+            if (oe.extra_bits > 0) {
+                try self.bit_writer.writeBits(oe.extra_distance, oe.extra_bits);
+            }
+        }
+        try self.writeCode(le_codes[consts.huffman.end_block_marker]);
+    }
+
+    fn histogram(b: []const u8, h: *[286]u16) void {
+        for (h, 0..) |_, i| {
+            h[i] = 0;
+        }
+
+        var lh = h.*[0..256];
+        for (b) |t| {
+            lh[t] += 1;
+        }
+    }
+
+    fn generateCodegen(
+        self: *Self,
+        num_literals: u32,
+        num_distances: u32,
+        lit_enc: *LiteralEncoder,
+        dist_enc: *DistanceEncoder,
+    ) void {
+        for (self.codegen_freq, 0..) |_, i| {
+            self.codegen_freq[i] = 0;
+        }
+
+        var codegen = &self.codegen;
+        var cgnl = codegen[0..num_literals];
+        for (cgnl, 0..) |_, i| {
+            cgnl[i] = @as(u8, @intCast(lit_enc.codes[i].len));
+        }
+
+        cgnl = codegen[num_literals .. num_literals + num_distances];
+        for (cgnl, 0..) |_, i| {
+            cgnl[i] = @as(u8, @intCast(dist_enc.codes[i].len));
+        }
+        codegen[num_literals + num_distances] = end_code_mark;
+
+        var size = codegen[0];
+        var count: i32 = 1;
+        var out_index: u32 = 0;
+        var in_index: u32 = 1;
+        while (size != end_code_mark) : (in_index += 1) {
+            const next_size = codegen[in_index];
+            if (next_size == size) {
+                count += 1;
+                continue;
+            }
+            if (size != 0) {
+                codegen[out_index] = size;
+                out_index += 1;
+                self.codegen_freq[size] += 1;
+                count -= 1;
+                while (count >= 3) {
+                    var n: i32 = 6;
+                    if (n > count) {
+                        n = count;
+                    }
+                    codegen[out_index] = 16;
+                    out_index += 1;
+                    codegen[out_index] = @as(u8, @intCast(n - 3));
+                    out_index += 1;
+                    self.codegen_freq[16] += 1;
+                    count -= n;
+                }
+            } else {
+                while (count >= 11) {
+                    var n: i32 = 138;
+                    if (n > count) {
+                        n = count;
+                    }
+                    codegen[out_index] = 18;
+                    out_index += 1;
+                    codegen[out_index] = @as(u8, @intCast(n - 11));
+                    out_index += 1;
+                    self.codegen_freq[18] += 1;
+                    count -= n;
+                }
+                if (count >= 3) {
+                    codegen[out_index] = 17;
+                    out_index += 1;
+                    codegen[out_index] = @as(u8, @intCast(count - 3));
+                    out_index += 1;
+                    self.codegen_freq[17] += 1;
+                    count = 0;
+                }
+            }
+            count -= 1;
+            while (count >= 0) : (count -= 1) {
+                codegen[out_index] = size;
+                out_index += 1;
+                self.codegen_freq[size] += 1;
+            }
+            size = next_size;
+            count = 1;
+        }
+        codegen[out_index] = end_code_mark;
+    }
+
+    const DynamicSize = struct {
+        size: u32,
+        num_codegens: u32,
+    };
+
+    fn dynamicSize(
+        self: *Self,
+        lit_enc: *LiteralEncoder,
+        dist_enc: *DistanceEncoder,
+        extra_bits: u32,
+    ) DynamicSize {
+        var num_codegens = self.codegen_freq.len;
+        while (num_codegens > 4 and self.codegen_freq[codegen_order[num_codegens - 1]] == 0) {
+            num_codegens -= 1;
+        }
+        const header = 3 + 5 + 5 + 4 + (3 * num_codegens) +
+            self.codegen_encoding.bitLength(self.codegen_freq[0..]) +
+            self.codegen_freq[16] * 2 +
+            self.codegen_freq[17] * 3 +
+            self.codegen_freq[18] * 7;
+        const size = header +
+            lit_enc.bitLength(&self.literal_freq) +
+            dist_enc.bitLength(&self.distance_freq) +
+            extra_bits;
+
+        return DynamicSize{
+            .size = @as(u32, @intCast(size)),
+            .num_codegens = @as(u32, @intCast(num_codegens)),
+        };
+    }
+
+    fn fixedSize(self: *Self, extra_bits: u32) u32 {
+        return 3 +
+            self.fixed_literal_encoding.bitLength(&self.literal_freq) +
+            self.fixed_distance_encoding.bitLength(&self.distance_freq) +
+            extra_bits;
+    }
+
+    const StoredSize = struct {
+        size: u32,
+        storable: bool,
+    };
+
+    fn storedSizeFits(in: ?[]const u8) StoredSize {
+        if (in == null) {
+            return .{ .size = 0, .storable = false };
+        }
+        if (in.?.len <= consts.huffman.max_store_block_size) {
+            return .{ .size = @as(u32, @intCast((in.?.len + 5) * 8)), .storable = true };
+        }
+        return .{ .size = 0, .storable = false };
+    }
+
+    fn dynamicHeader(
+        self: *Self,
+        num_literals: u32,
+        num_distances: u32,
+        num_codegens: u32,
+        eof: bool,
+    ) Error!void {
+        const first_bits: u32 = if (eof) 5 else 4;
+        try self.bit_writer.writeBits(first_bits, 3);
+        try self.bit_writer.writeBits(num_literals - 257, 5);
+        try self.bit_writer.writeBits(num_distances - 1, 5);
+        try self.bit_writer.writeBits(num_codegens - 4, 4);
+
+        var i: u32 = 0;
+        while (i < num_codegens) : (i += 1) {
+            const value = self.codegen_encoding.codes[codegen_order[i]].len;
             try self.bit_writer.writeBits(value, 3);
         }
 
-        pub fn write(self: *Self, tokens: []const Token, eof: bool, input: ?[]const u8) Error!void {
-            const lit_and_dist = self.indexTokens(tokens);
-            const num_literals = lit_and_dist.num_literals;
-            const num_distances = lit_and_dist.num_distances;
-
-            var extra_bits: u32 = 0;
-            const ret = storedSizeFits(input);
-            const stored_size = ret.size;
-            const storable = ret.storable;
-
-            if (storable) {
-                var length_code: u16 = Token.length_codes_start + 8;
-                while (length_code < num_literals) : (length_code += 1) {
-                    extra_bits += @as(u32, @intCast(self.literal_freq[length_code])) *
-                        @as(u32, @intCast(Token.lengthExtraBits(length_code)));
-                }
-                var distance_code: u16 = 4;
-                while (distance_code < num_distances) : (distance_code += 1) {
-                    extra_bits += @as(u32, @intCast(self.distance_freq[distance_code])) *
-                        @as(u32, @intCast(Token.distanceExtraBits(distance_code)));
-                }
+        i = 0;
+        while (true) {
+            const code_word: u32 = @as(u32, @intCast(self.codegen[i]));
+            i += 1;
+            if (code_word == end_code_mark) {
+                break;
             }
+            try self.writeCode(self.codegen_encoding.codes[@as(u32, @intCast(code_word))]);
 
-            var literal_encoding = &self.fixed_literal_encoding;
-            var distance_encoding = &self.fixed_distance_encoding;
-            var size = self.fixedSize(extra_bits);
-
-            var num_codegens: u32 = 0;
-
-            self.generateCodegen(
-                num_literals,
-                num_distances,
-                &self.literal_encoding,
-                &self.distance_encoding,
-            );
-            self.codegen_encoding.generate(self.codegen_freq[0..], 7);
-            const dynamic_size = self.dynamicSize(
-                &self.literal_encoding,
-                &self.distance_encoding,
-                extra_bits,
-            );
-            const dyn_size = dynamic_size.size;
-            num_codegens = dynamic_size.num_codegens;
-
-            if (dyn_size < size) {
-                size = dyn_size;
-                literal_encoding = &self.literal_encoding;
-                distance_encoding = &self.distance_encoding;
-            }
-
-            if (storable and stored_size < size) {
-                try self.storedBlock(input.?, eof);
-                return;
-            }
-
-            if (@intFromPtr(literal_encoding) == @intFromPtr(&self.fixed_literal_encoding)) {
-                try self.fixedHeader(eof);
-            } else {
-                try self.dynamicHeader(num_literals, num_distances, num_codegens, eof);
-            }
-
-            try self.writeTokens(tokens, &literal_encoding.codes, &distance_encoding.codes);
-        }
-
-        pub fn huffmanBlock(self: *Self, input: []const u8, eof: bool) Error!void {
-            histogram(input, &self.literal_freq);
-
-            self.literal_freq[consts.huffman.end_block_marker] = 1;
-
-            const num_literals = consts.huffman.end_block_marker + 1;
-            self.distance_freq[0] = 1;
-            const num_distances = 1;
-
-            self.literal_encoding.generate(&self.literal_freq, 15);
-
-            var num_codegens: u32 = 0;
-
-            self.generateCodegen(
-                num_literals,
-                num_distances,
-                &self.literal_encoding,
-                &self.huff_distance,
-            );
-            self.codegen_encoding.generate(self.codegen_freq[0..], 7);
-            const dynamic_size = self.dynamicSize(&self.literal_encoding, &self.huff_distance, 0);
-            const size = dynamic_size.size;
-            num_codegens = dynamic_size.num_codegens;
-
-            const stored_size_ret = storedSizeFits(input);
-            const ssize = stored_size_ret.size;
-            const storable = stored_size_ret.storable;
-
-            if (storable and ssize < (size + (size >> 4))) {
-                try self.storedBlock(input, eof);
-                return;
-            }
-
-            try self.dynamicHeader(num_literals, num_distances, num_codegens, eof);
-            const encoding = self.literal_encoding.codes[0..257];
-
-            for (input) |t| {
-                const c = encoding[t];
-                try self.bit_writer.writeBits(c.code, c.len);
-            }
-            try self.writeCode(encoding[consts.huffman.end_block_marker]);
-        }
-
-        const TotalIndexedTokens = struct {
-            num_literals: u32,
-            num_distances: u32,
-        };
-
-        fn indexTokens(self: *Self, tokens: []const Token) TotalIndexedTokens {
-            var num_literals: u32 = 0;
-            var num_distances: u32 = 0;
-
-            for (self.literal_freq, 0..) |_, i| {
-                self.literal_freq[i] = 0;
-            }
-            for (self.distance_freq, 0..) |_, i| {
-                self.distance_freq[i] = 0;
-            }
-
-            for (tokens) |t| {
-                if (t.kind == Token.Kind.literal) {
-                    self.literal_freq[t.literal()] += 1;
-                    continue;
-                }
-                self.literal_freq[t.lengthCode()] += 1;
-                self.distance_freq[t.distanceCode()] += 1;
-            }
-            self.literal_freq[consts.huffman.end_block_marker] += 1;
-
-            num_literals = @as(u32, @intCast(self.literal_freq.len));
-            while (self.literal_freq[num_literals - 1] == 0) {
-                num_literals -= 1;
-            }
-            num_distances = @as(u32, @intCast(self.distance_freq.len));
-            while (num_distances > 0 and self.distance_freq[num_distances - 1] == 0) {
-                num_distances -= 1;
-            }
-            if (num_distances == 0) {
-                self.distance_freq[0] = 1;
-                num_distances = 1;
-            }
-            self.literal_encoding.generate(&self.literal_freq, 15);
-            self.distance_encoding.generate(&self.distance_freq, 15);
-            return TotalIndexedTokens{
-                .num_literals = num_literals,
-                .num_distances = num_distances,
-            };
-        }
-
-        fn writeTokens(
-            self: *Self,
-            tokens: []const Token,
-            le_codes: []HuffCode,
-            oe_codes: []HuffCode,
-        ) Error!void {
-            for (tokens) |t| {
-                if (t.kind == Token.Kind.literal) {
-                    try self.writeCode(le_codes[t.literal()]);
-                    continue;
-                }
-
-                const le = t.lengthEncoding();
-                try self.writeCode(le_codes[le.code]);
-                if (le.extra_bits > 0) {
-                    try self.bit_writer.writeBits(le.extra_length, le.extra_bits);
-                }
-
-                const oe = t.distanceEncoding();
-                try self.writeCode(oe_codes[oe.code]);
-                if (oe.extra_bits > 0) {
-                    try self.bit_writer.writeBits(oe.extra_distance, oe.extra_bits);
-                }
-            }
-            try self.writeCode(le_codes[consts.huffman.end_block_marker]);
-        }
-
-        fn histogram(b: []const u8, h: *[286]u16) void {
-            for (h, 0..) |_, i| {
-                h[i] = 0;
-            }
-
-            var lh = h.*[0..256];
-            for (b) |t| {
-                lh[t] += 1;
+            switch (code_word) {
+                16 => {
+                    try self.bit_writer.writeBits(self.codegen[i], 2);
+                    i += 1;
+                },
+                17 => {
+                    try self.bit_writer.writeBits(self.codegen[i], 3);
+                    i += 1;
+                },
+                18 => {
+                    try self.bit_writer.writeBits(self.codegen[i], 7);
+                    i += 1;
+                },
+                else => {},
             }
         }
-
-        fn generateCodegen(
-            self: *Self,
-            num_literals: u32,
-            num_distances: u32,
-            lit_enc: *LiteralEncoder,
-            dist_enc: *DistanceEncoder,
-        ) void {
-            for (self.codegen_freq, 0..) |_, i| {
-                self.codegen_freq[i] = 0;
-            }
-
-            var codegen = &self.codegen;
-            var cgnl = codegen[0..num_literals];
-            for (cgnl, 0..) |_, i| {
-                cgnl[i] = @as(u8, @intCast(lit_enc.codes[i].len));
-            }
-
-            cgnl = codegen[num_literals .. num_literals + num_distances];
-            for (cgnl, 0..) |_, i| {
-                cgnl[i] = @as(u8, @intCast(dist_enc.codes[i].len));
-            }
-            codegen[num_literals + num_distances] = end_code_mark;
-
-            var size = codegen[0];
-            var count: i32 = 1;
-            var out_index: u32 = 0;
-            var in_index: u32 = 1;
-            while (size != end_code_mark) : (in_index += 1) {
-                const next_size = codegen[in_index];
-                if (next_size == size) {
-                    count += 1;
-                    continue;
-                }
-                if (size != 0) {
-                    codegen[out_index] = size;
-                    out_index += 1;
-                    self.codegen_freq[size] += 1;
-                    count -= 1;
-                    while (count >= 3) {
-                        var n: i32 = 6;
-                        if (n > count) {
-                            n = count;
-                        }
-                        codegen[out_index] = 16;
-                        out_index += 1;
-                        codegen[out_index] = @as(u8, @intCast(n - 3));
-                        out_index += 1;
-                        self.codegen_freq[16] += 1;
-                        count -= n;
-                    }
-                } else {
-                    while (count >= 11) {
-                        var n: i32 = 138;
-                        if (n > count) {
-                            n = count;
-                        }
-                        codegen[out_index] = 18;
-                        out_index += 1;
-                        codegen[out_index] = @as(u8, @intCast(n - 11));
-                        out_index += 1;
-                        self.codegen_freq[18] += 1;
-                        count -= n;
-                    }
-                    if (count >= 3) {
-                        codegen[out_index] = 17;
-                        out_index += 1;
-                        codegen[out_index] = @as(u8, @intCast(count - 3));
-                        out_index += 1;
-                        self.codegen_freq[17] += 1;
-                        count = 0;
-                    }
-                }
-                count -= 1;
-                while (count >= 0) : (count -= 1) {
-                    codegen[out_index] = size;
-                    out_index += 1;
-                    self.codegen_freq[size] += 1;
-                }
-                size = next_size;
-                count = 1;
-            }
-            codegen[out_index] = end_code_mark;
-        }
-
-        const DynamicSize = struct {
-            size: u32,
-            num_codegens: u32,
-        };
-
-        fn dynamicSize(
-            self: *Self,
-            lit_enc: *LiteralEncoder,
-            dist_enc: *DistanceEncoder,
-            extra_bits: u32,
-        ) DynamicSize {
-            var num_codegens = self.codegen_freq.len;
-            while (num_codegens > 4 and self.codegen_freq[codegen_order[num_codegens - 1]] == 0) {
-                num_codegens -= 1;
-            }
-            const header = 3 + 5 + 5 + 4 + (3 * num_codegens) +
-                self.codegen_encoding.bitLength(self.codegen_freq[0..]) +
-                self.codegen_freq[16] * 2 +
-                self.codegen_freq[17] * 3 +
-                self.codegen_freq[18] * 7;
-            const size = header +
-                lit_enc.bitLength(&self.literal_freq) +
-                dist_enc.bitLength(&self.distance_freq) +
-                extra_bits;
-
-            return DynamicSize{
-                .size = @as(u32, @intCast(size)),
-                .num_codegens = @as(u32, @intCast(num_codegens)),
-            };
-        }
-
-        fn fixedSize(self: *Self, extra_bits: u32) u32 {
-            return 3 +
-                self.fixed_literal_encoding.bitLength(&self.literal_freq) +
-                self.fixed_distance_encoding.bitLength(&self.distance_freq) +
-                extra_bits;
-        }
-
-        const StoredSize = struct {
-            size: u32,
-            storable: bool,
-        };
-
-        fn storedSizeFits(in: ?[]const u8) StoredSize {
-            if (in == null) {
-                return .{ .size = 0, .storable = false };
-            }
-            if (in.?.len <= consts.huffman.max_store_block_size) {
-                return .{ .size = @as(u32, @intCast((in.?.len + 5) * 8)), .storable = true };
-            }
-            return .{ .size = 0, .storable = false };
-        }
-
-        fn dynamicHeader(
-            self: *Self,
-            num_literals: u32,
-            num_distances: u32,
-            num_codegens: u32,
-            eof: bool,
-        ) Error!void {
-            const first_bits: u32 = if (eof) 5 else 4;
-            try self.bit_writer.writeBits(first_bits, 3);
-            try self.bit_writer.writeBits(num_literals - 257, 5);
-            try self.bit_writer.writeBits(num_distances - 1, 5);
-            try self.bit_writer.writeBits(num_codegens - 4, 4);
-
-            var i: u32 = 0;
-            while (i < num_codegens) : (i += 1) {
-                const value = self.codegen_encoding.codes[codegen_order[i]].len;
-                try self.bit_writer.writeBits(value, 3);
-            }
-
-            i = 0;
-            while (true) {
-                const code_word: u32 = @as(u32, @intCast(self.codegen[i]));
-                i += 1;
-                if (code_word == end_code_mark) {
-                    break;
-                }
-                try self.writeCode(self.codegen_encoding.codes[@as(u32, @intCast(code_word))]);
-
-                switch (code_word) {
-                    16 => {
-                        try self.bit_writer.writeBits(self.codegen[i], 2);
-                        i += 1;
-                    },
-                    17 => {
-                        try self.bit_writer.writeBits(self.codegen[i], 3);
-                        i += 1;
-                    },
-                    18 => {
-                        try self.bit_writer.writeBits(self.codegen[i], 7);
-                        i += 1;
-                    },
-                    else => {},
-                }
-            }
-        }
-    };
-}
+    }
+};
 
 pub const Options = struct {
     level: Level = .default,
@@ -1384,27 +1398,23 @@ const LevelArgs = struct {
     }
 };
 
-pub fn deflateCompress(comptime container: Container, reader: anytype, writer: anytype, options: Options) !void {
+pub fn deflateCompress(comptime container: Container, reader: *std.Io.Reader, writer: *std.Io.Writer, options: Options) !void {
     var c = try deflateCompressor(container, writer, options);
     try c.compress(reader);
     try c.finish();
 }
 
-pub fn deflateCompressor(comptime container: Container, writer: anytype, options: Options) !Deflate(
-    container,
-    @TypeOf(writer),
-    BlockWriter(@TypeOf(writer)),
-) {
-    return try Deflate(container, @TypeOf(writer), BlockWriter(@TypeOf(writer))).init(writer, options);
+pub fn deflateCompressor(comptime container: Container, writer: *std.Io.Writer, options: Options) !Deflate(container) {
+    return try Deflate(container).init(writer, options);
 }
 
-pub fn Deflate(comptime container: Container, comptime WriterType: type, comptime TokenWriterType: type) type {
+pub fn Deflate(comptime container: Container) type {
     return struct {
         lookup: Lookup = .{},
         win: SlidingWindow = .{},
         tokens: Tokens = .{},
-        wrt: WriterType,
-        block_writer: TokenWriterType,
+        wrt: *std.Io.Writer,
+        block_writer: BlockWriter,
         level: LevelArgs,
         hasher: container.Hasher() = .{},
 
@@ -1413,10 +1423,10 @@ pub fn Deflate(comptime container: Container, comptime WriterType: type, comptim
 
         const Self = @This();
 
-        pub fn init(wrt: WriterType, options: Options) !Self {
+        pub fn init(wrt: *std.Io.Writer, options: Options) !Self {
             const self = Self{
                 .wrt = wrt,
-                .block_writer = TokenWriterType.init(wrt),
+                .block_writer = BlockWriter.init(wrt),
                 .level = LevelArgs.get(options.level),
             };
             try Container.writeHeader(container, self.wrt);
@@ -1530,7 +1540,7 @@ pub fn Deflate(comptime container: Container, comptime WriterType: type, comptim
             self.lookup.slide(n);
         }
 
-        pub fn compress(self: *Self, reader: anytype) !void {
+        pub fn compress(self: *Self, reader: *std.Io.Reader) !void {
             while (true) {
                 const buf = self.win.writable();
                 if (buf.len == 0) {
@@ -1538,18 +1548,17 @@ pub fn Deflate(comptime container: Container, comptime WriterType: type, comptim
                     self.slide();
                     continue;
                 }
-                const n = if (@typeInfo(@TypeOf(reader)) == .pointer) blk: {
-                    const slice = reader.*.take(buf.len) catch |err| switch (err) {
-                        error.EndOfStream => break,
-                        error.ReadFailed => return error.ReadFailed,
-                    };
-                    @memcpy(buf[0..slice.len], slice);
-                    break :blk slice.len;
-                } else try reader.readAll(buf);
-                self.hasher.update(buf[0..n]);
-                self.win.written(n);
+                // Read up to buffer size, limiting to avoid buffer overflow
+                const read_size = @min(buf.len, 4096);
+                const slice = reader.take(read_size) catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    error.ReadFailed => return error.ReadFailed,
+                };
+                @memcpy(buf[0..slice.len], slice);
+                self.hasher.update(buf[0..slice.len]);
+                self.win.written(slice.len);
                 try self.tokenize(.none);
-                if (n < buf.len) break;
+                if (slice.len < read_size) break;
             }
         }
 
@@ -1562,22 +1571,9 @@ pub fn Deflate(comptime container: Container, comptime WriterType: type, comptim
             try Container.writeFooter(container, &self.hasher, self.wrt);
         }
 
-        pub fn setWriter(self: *Self, new_writer: WriterType) void {
+        pub fn setWriter(self: *Self, new_writer: *std.Io.Writer) void {
             self.block_writer.setWriter(new_writer);
             self.wrt = new_writer;
-        }
-
-        pub const Writer = io.Writer(*Self, Error, write);
-        pub const Error = TokenWriterType.Error;
-
-        pub fn write(self: *Self, input: []const u8) !usize {
-            var fbs = io.fixedBufferStream(input);
-            try self.compress(fbs.reader());
-            return input.len;
-        }
-
-        pub fn writer(self: *Self) Writer {
-            return .{ .context = self };
         }
     };
 }
@@ -1604,27 +1600,33 @@ const Tokens = struct {
     }
 };
 
-pub fn compress(reader: anytype, writer: anytype, options: Options) !void {
+pub fn compress(reader: *std.Io.Reader, writer: *std.Io.Writer, options: Options) !void {
     try deflateCompress(.gzip, reader, writer, options);
 }
 
-pub fn Compressor(comptime WriterType: type) type {
-    return Deflate(.gzip, WriterType, BlockWriter(WriterType));
-}
+pub const Compressor = Deflate(.gzip);
 
-pub fn compressor(writer: anytype, options: Options) !Compressor(@TypeOf(writer)) {
+pub fn compressor(writer: *std.Io.Writer, options: Options) !Compressor {
     return try deflateCompressor(.gzip, writer, options);
 }
 
 test "basic compression" {
     var compressed_buffer: [1024]u8 = undefined;
-    var compressed_fbs = io.fixedBufferStream(&compressed_buffer);
+    var fixed_writer = std.Io.Writer.fixed(&compressed_buffer);
 
     const data = "Hello, World!";
-    var fbs = io.fixedBufferStream(data);
-    try compress(fbs.reader(), compressed_fbs.writer(), .{});
+    var input_buffer: [1024]u8 = undefined;
+    @memcpy(input_buffer[0..data.len], data);
+    var input_reader = std.Io.Reader.fixed(input_buffer[0..data.len]);
 
-    const compressed = compressed_fbs.getWritten();
+    try compress(&input_reader, &fixed_writer, .{});
+
+    // Find the end of compressed data by checking for non-zero bytes
+    var written: usize = 0;
+    for (compressed_buffer, 0..) |byte, i| {
+        if (byte != 0) written = i + 1;
+    }
+    const compressed = compressed_buffer[0..written];
     try expect(compressed.len > 0);
     try expect(compressed[0] == 0x1f);
     try expect(compressed[1] == 0x8b);
@@ -1660,20 +1662,29 @@ test "token distance encoding" {
 
 test "compression levels" {
     var compressed_fast: [1024]u8 = undefined;
-    var cfs_fast = io.fixedBufferStream(&compressed_fast);
+    var fixed_fast = std.Io.Writer.fixed(&compressed_fast);
 
     var compressed_best: [1024]u8 = undefined;
-    var cfs_best = io.fixedBufferStream(&compressed_best);
+    var fixed_best = std.Io.Writer.fixed(&compressed_best);
 
     const data = "The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog.";
-    var fbs = io.fixedBufferStream(data);
+    var input_buffer: [1024]u8 = undefined;
+    @memcpy(input_buffer[0..data.len], data);
+    var input_reader = std.Io.Reader.fixed(input_buffer[0..data.len]);
 
-    try compress(fbs.reader(), cfs_fast.writer(), .{ .level = .fast });
-    fbs.reset();
-    try compress(fbs.reader(), cfs_best.writer(), .{ .level = .best });
+    try compress(&input_reader, &fixed_fast, .{ .level = .fast });
+    try compress(&input_reader, &fixed_best, .{ .level = .best });
 
-    const fast_result = cfs_fast.getWritten();
-    const best_result = cfs_best.getWritten();
+    var fast_written: usize = 0;
+    for (compressed_fast, 0..) |byte, i| {
+        if (byte != 0) fast_written = i + 1;
+    }
+    var best_written: usize = 0;
+    for (compressed_best, 0..) |byte, i| {
+        if (byte != 0) best_written = i + 1;
+    }
+    const fast_result = compressed_fast[0..fast_written];
+    const best_result = compressed_best[0..best_written];
 
     try expect(fast_result.len > 0);
     try expect(best_result.len > 0);
@@ -1685,19 +1696,32 @@ test "compression with different sizes" {
     const large_data = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.";
 
     var small_buffer: [1024]u8 = undefined;
-    var small_fbs = io.fixedBufferStream(&small_buffer);
+    var small_fixed = std.Io.Writer.fixed(&small_buffer);
 
     var large_buffer: [2048]u8 = undefined;
-    var large_fbs = io.fixedBufferStream(&large_buffer);
+    var large_fixed = std.Io.Writer.fixed(&large_buffer);
 
-    var small_input = io.fixedBufferStream(small_data);
-    var large_input = io.fixedBufferStream(large_data);
+    var small_input_buffer: [1024]u8 = undefined;
+    @memcpy(small_input_buffer[0..small_data.len], small_data);
+    var small_input_reader = std.Io.Reader.fixed(small_input_buffer[0..small_data.len]);
 
-    try compress(small_input.reader(), small_fbs.writer(), .{});
-    try compress(large_input.reader(), large_fbs.writer(), .{});
+    var large_input_buffer: [2048]u8 = undefined;
+    @memcpy(large_input_buffer[0..large_data.len], large_data);
+    var large_input_reader = std.Io.Reader.fixed(large_input_buffer[0..large_data.len]);
 
-    const small_compressed = small_fbs.getWritten();
-    const large_compressed = large_fbs.getWritten();
+    try compress(&small_input_reader, &small_fixed, .{});
+    try compress(&large_input_reader, &large_fixed, .{});
+
+    var small_written: usize = 0;
+    for (small_buffer, 0..) |byte, i| {
+        if (byte != 0) small_written = i + 1;
+    }
+    var large_written: usize = 0;
+    for (large_buffer, 0..) |byte, i| {
+        if (byte != 0) large_written = i + 1;
+    }
+    const small_compressed = small_buffer[0..small_written];
+    const large_compressed = large_buffer[0..large_written];
 
     try expect(small_compressed.len > 10);
     try expect(large_compressed.len > 50);

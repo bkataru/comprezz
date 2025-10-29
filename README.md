@@ -46,23 +46,43 @@ const std = @import("std");
 const comprezz = @import("comprezz");
 
 pub fn main() !void {
-    var buffer: [1024]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buffer);
+    var compressed_buffer: [1024]u8 = undefined;
+    var fixed_writer = std.Io.Writer.fixed(&compressed_buffer);
     
     const data = "Hello, World!";
-    var input = std.io.fixedBufferStream(data);
+    var input_buffer: [1024]u8 = undefined;
+    @memcpy(input_buffer[0..data.len], data);
+    var input_reader = std.Io.Reader.fixed(input_buffer[0..data.len]);
     
-    try comprezz.compress(input.reader(), fbs.writer(), .{});
+    try comprezz.compress(&input_reader, &fixed_writer, .{});
     
-    const compressed = fbs.getWritten();
+    // Find the end of compressed data by checking for non-zero bytes
+    var written: usize = 0;
+    for (compressed_buffer, 0..) |byte, i| {
+        if (byte != 0) written = i + 1;
+    }
+    const compressed = compressed_buffer[0..written];
     _ = compressed;
 }
 ```
 
-### With Compression Level
+### With File I/O
 
 ```zig
-try comprezz.compress(reader, writer, .{ .level = .best });
+const std = @import("std");
+const comprezz = @import("comprezz");
+
+pub fn main() !void {
+    const input_file = try std.fs.cwd().openFile("input.txt", .{});
+    defer input_file.close();
+    var input_reader = input_file.reader();
+    
+    const output_file = try std.fs.cwd().createFile("output.gz", .{});
+    defer output_file.close();
+    var output_writer = output_file.writer();
+    
+    try comprezz.compress(&input_reader, &output_writer, .{ .level = .best });
+}
 ```
 
 Available compression levels:
@@ -73,20 +93,26 @@ Available compression levels:
 
 ### Using the Compressor Type
 
-```zig
-var comp = try comprezz.compressor(writer, .{ .level = .fast });
-
-try comp.compress(reader);
-try comp.finish();
-```
-
-Or with the Writer interface:
+For streaming compression, you can use the compressor API:
 
 ```zig
-var comp = try comprezz.compressor(writer, .{});
-const w = comp.writer();
-try w.writeAll("Hello, World!");
-try comp.finish();
+const std = @import("std");
+const comprezz = @import("comprezz");
+
+pub fn main() !void {
+    const output_file = try std.fs.cwd().createFile("output.gz", .{});
+    defer output_file.close();
+    var output_writer = output_file.writer();
+    
+    var comp = try comprezz.compressor(&output_writer, .{ .level = .fast });
+    
+    const input_file = try std.fs.cwd().openFile("input.txt", .{});
+    defer input_file.close();
+    var input_reader = input_file.reader();
+    
+    try comp.compress(&input_reader);
+    try comp.finish();
+}
 ```
 
 ## CLI Usage
@@ -130,28 +156,30 @@ comprezz largefile.txt > compressed.gz
 #### `compress`
 
 ```zig
-pub fn compress(reader: anytype, writer: anytype, options: Options) !void
+pub fn compress(reader: *std.Io.Reader, writer: *std.Io.Writer, options: Options) !void
 ```
 
 Compress data from a reader and write to a writer using gzip format.
 
-- `reader`: Any reader type with `.read()` method
-- `writer`: Any writer type with `.write()` method
+- `reader`: Pointer to a `std.Io.Reader` interface
+- `writer`: Pointer to a `std.Io.Writer` interface
 - `options`: Compression options (level)
 
 #### `compressor`
 
 ```zig
-pub fn compressor(writer: anytype, options: Options) !Compressor(@TypeOf(writer))
+pub fn compressor(writer: *std.Io.Writer, options: Options) !Compressor
 ```
 
 Create a compressor instance for streaming compression.
 
+#### `Compressor`
+
 ```zig
-pub fn Compressor(comptime WriterType: type) type
+pub const Compressor = Deflate(.gzip);
 ```
 
-Get the Compressor type for a specific writer type.
+The Compressor type for gzip compression.
 
 ### Compression Levels
 
@@ -226,7 +254,7 @@ This code is based on the Zig 0.14 standard library, which is part of the Zig pr
 
 - Original implementation based on Zig 0.14 standard library
 - Deflate algorithm implementation inspired by zlib and Go's compress/flate
-- Adapted for Zig 0.15 compatibility
+- Adapted for Zig 0.15 compatibility with new `std.Io.Reader` and `std.Io.Writer` interfaces
 
 ## Limitations
 

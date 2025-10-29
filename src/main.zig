@@ -1,12 +1,11 @@
 const std = @import("std");
 const comprezz = @import("comprezz");
-const io = std.io;
 const process = std.process;
 const fs = std.fs;
 const mem = std.mem;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
