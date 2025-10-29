@@ -2,7 +2,6 @@
 //!
 //! This is a single-file implementation of gzip/deflate compression copied from
 //! the Zig 0.14 standard library, as compression was removed in Zig 0.15.
-//! Updated to use Zig 0.15's new std.Io.Reader and std.Io.Writer interfaces.
 //!
 //! Usage:
 //! ```zig
